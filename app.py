@@ -269,12 +269,9 @@ class AfterHoursAgent(AgentBase):
 
         self.prompt_add_section(
             "Service Request Flow",
-            "When collecting a service request, gather info in this order: "
-            "1) Issue type (AC or heating) and if it's an emergency, "
-            "2) Customer name, 3) Service address (full address with apt/unit if applicable), "
-            "4) HVAC unit info (brand, age, location), 5) Own or rent, "
-            "6) Callback number(s), 7) Detailed issue description. "
-            "Call each function as you collect each piece of info."
+            "IMPORTANT: Ask only ONE question at a time and wait for the answer before asking the next. "
+            "Never batch multiple questions together. Follow the steps in order - each step will guide you "
+            "to the next question. Be patient and let the customer answer each question fully."
         )
 
         self.prompt_add_section(
@@ -313,22 +310,50 @@ class AfterHoursAgent(AgentBase):
             .set_functions(["start_service_request"])
 
         # -----------------------------------------------------------------------
-        # Service Request Context - Collect all service request details
+        # Service Request Context - Collect details one question at a time
         # -----------------------------------------------------------------------
         service_req = contexts.add_context("service_request")
-        service_req.add_step("collect") \
-            .set_text("Let me gather your information for a service request.") \
-            .set_step_criteria("All service request details have been collected") \
-            .set_functions([
-                "set_issue_type",
-                "set_customer_name",
-                "set_service_address",
-                "set_unit_info",
-                "set_ownership",
-                "set_callback_numbers",
-                "set_issue_description",
-                "cancel_flow"
-            ])
+
+        service_req.add_step("get_issue_type") \
+            .set_text("First, is this for your air conditioning or heating system? And would you consider this an emergency?") \
+            .set_step_criteria("Customer has indicated issue type (AC or heating) and emergency status") \
+            .set_functions(["set_issue_type", "cancel_flow"]) \
+            .set_valid_steps(["get_customer_name"])
+
+        service_req.add_step("get_customer_name") \
+            .set_text("May I have your name please?") \
+            .set_step_criteria("Customer has provided their name") \
+            .set_functions(["set_customer_name", "cancel_flow"]) \
+            .set_valid_steps(["get_service_address"])
+
+        service_req.add_step("get_service_address") \
+            .set_text("What is the service address? Please include the full street address and any apartment or unit number.") \
+            .set_step_criteria("Customer has provided the service address") \
+            .set_functions(["set_service_address", "cancel_flow"]) \
+            .set_valid_steps(["get_unit_info"])
+
+        service_req.add_step("get_unit_info") \
+            .set_text("Can you tell me about your HVAC unit - the brand if you know it, approximately how old it is, and where it's located?") \
+            .set_step_criteria("Customer has provided unit information") \
+            .set_functions(["set_unit_info", "cancel_flow"]) \
+            .set_valid_steps(["get_ownership"])
+
+        service_req.add_step("get_ownership") \
+            .set_text("Do you own or rent this property?") \
+            .set_step_criteria("Customer has indicated ownership status") \
+            .set_functions(["set_ownership", "cancel_flow"]) \
+            .set_valid_steps(["get_callback_numbers"])
+
+        service_req.add_step("get_callback_numbers") \
+            .set_text("What's the best phone number for our technician to reach you? And is there an alternate number?") \
+            .set_step_criteria("Customer has provided callback number(s)") \
+            .set_functions(["set_callback_numbers", "cancel_flow"]) \
+            .set_valid_steps(["get_issue_description"])
+
+        service_req.add_step("get_issue_description") \
+            .set_text("Please describe the problem you're experiencing with your system.") \
+            .set_step_criteria("Customer has described the issue") \
+            .set_functions(["set_issue_description", "cancel_flow"])
 
         # -----------------------------------------------------------------------
         # Confirmation Context - Review and confirm
