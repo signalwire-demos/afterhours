@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<!--
+===============================================================================
+Wire Heating and Air - After-Hours Service Dashboard
+===============================================================================
+
+A WebRTC frontend for the after-hours service agent.
+Displays service requests and handles real-time updates.
+
+===============================================================================
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wire Heating and Air - After-Hours Service</title>
+
+    <!-- Open Graph / Social Media -->
+    <meta property="og:title" content="Wire Heating and Air - After-Hours Service">
+    <meta property="og:description" content="24/7 emergency HVAC service request system">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="/afterhours.png">
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="/afterhours.png">
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="styles.css">
+
+    <!-- SignalWire SDK -->
+    <script src="https://cdn.signalwire.com/@signalwire/client"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header>
+        <a href="https://github.com/signalwire-demos/afterhours" target="_blank" class="github-link" title="View on GitHub">
+            <svg height="24" width="24" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+            </svg>
+        </a>
+        <h1>Wire Heating and Air</h1>
+        <p class="subtitle">After-Hours Emergency Service</p>
+        <p id="phone-display" class="phone-number" style="display: none;"></p>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+        <!-- Left Panel: Video and Controls -->
+        <section class="video-section">
+            <!-- Video Container -->
+            <div id="video-container">
+                <div class="placeholder">
+                    <div class="placeholder-content">
+                        <div class="placeholder-icon">HVAC</div>
+                        <p>Click Connect to speak with our after-hours service</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Connection Controls -->
+            <div class="controls">
+                <button id="connect-btn" onclick="connect()">Connect</button>
+                <button id="disconnect-btn" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+
+            <!-- Status Display -->
+            <div id="status" class="status">
+                <span class="status-indicator"></span>
+                <span class="status-text">Ready to connect</span>
+            </div>
+
+            <!-- Event Log -->
+            <div class="event-log">
+                <h3>Activity Log</h3>
+                <div id="event-log" class="log-container"></div>
+            </div>
+        </section>
+
+        <!-- Right Panel: Service Requests Dashboard -->
+        <section class="requests-section">
+            <div class="requests-header">
+                <h2>Service Requests</h2>
+                <button id="refresh-btn" onclick="refreshRequests()">Refresh</button>
+            </div>
+
+            <div class="stats-row">
+                <div class="stat-card emergency">
+                    <span class="stat-value" id="emergency-count">0</span>
+                    <span class="stat-label">Emergency</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value" id="total-count">0</span>
+                    <span class="stat-label">Total Requests</span>
+                </div>
+            </div>
+
+            <!-- Requests List -->
+            <div id="requests-container" class="requests-container">
+                <div class="no-requests">
+                    <p>No service requests yet.</p>
+                    <p class="hint">Connect to submit an after-hours service request.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer>
+        <p>
+            <a href="https://github.com/signalwire-demos/afterhours" target="_blank">GitHub</a> |
+            <a href="https://developer.signalwire.com" target="_blank">Documentation</a>
+        </p>
+    </footer>
+
+    <!-- Application JavaScript -->
+    <script src="app.js"></script>
+</body>
+</html>
