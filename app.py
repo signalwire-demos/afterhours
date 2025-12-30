@@ -774,8 +774,8 @@ class AfterHoursAgent(AgentBase):
         base_url = self.get_full_url(include_auth=False)
 
         if base_url:
-            self.set_param("video_idle_file", f"{base_url}/hvac_idle.mp4")
-            self.set_param("video_talking_file", f"{base_url}/hvac_talking.mp4")
+            self.set_param("video_idle_file", f"{base_url}/sigmond_pc_idle.mp4")
+            self.set_param("video_talking_file", f"{base_url}/sigmond_pc_talking.mp4")
 
         # Optional post-prompt URL from environment
         post_prompt_url = os.environ.get("POST_PROMPT_URL")
