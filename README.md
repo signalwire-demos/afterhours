@@ -5,7 +5,7 @@ An after-hours emergency HVAC service agent built with SignalWire AI. Customers 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                                                                             │
-│    Customer calls  ───►  AI Agent  ───►  Service Request Created           │
+│    Customer calls  ───►  AI Agent  ───►  Service Request Created            │
 │                                                                             │
 │                              │                                              │
 │                              ▼                                              │
@@ -45,12 +45,12 @@ An after-hours emergency HVAC service agent built with SignalWire AI. Customers 
 │  │  │ Greeting │───►│  Service  │───►│ Confirm  │                     │ │
 │  │  │ Context  │    │  Request  │    │ Context  │                     │ │
 │  │  └──────────┘    │  Context  │    └──────────┘                     │ │
-│  │                  └───────────┘                                      │ │
+│  │                  └───────────┘                                     │ │
 │  └────────────────────────────────────────────────────────────────────┘ │
 │                                    │                                    │
 │                                    ▼                                    │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                     SERVICE_REQUESTS (dict)                      │    │
+│  │                     SERVICE_REQUESTS (dict)                     │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                    │                                    │
 │                                    ▼                                    │
