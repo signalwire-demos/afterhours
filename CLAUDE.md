@@ -19,7 +19,7 @@ gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --worker-class uvicorn.workers
 ## Architecture
 
 **Backend (`app.py`):**
-- Uses `signalwire-agents` SDK with `AgentBase` and `AgentServer` classes
+- Uses `signalwire-sdk` (import name `signalwire`) with `AgentBase` and `AgentServer` classes
 - Multi-context workflow pattern with `define_contexts()`, `add_context()`, `add_step()`
 - Contexts: `greeting` -> `service_request` -> `confirmation`
 - SWAIG functions defined with `@self.tool()` decorator for each step

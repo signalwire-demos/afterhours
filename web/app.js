@@ -4,7 +4,7 @@
  * ===============================================================================
  *
  * Handles WebRTC connection to the after-hours service agent and displays
- * service requests in real-time.
+ * service requests in real-time. Uses @signalwire/js v4.
  *
  * ===============================================================================
  */
@@ -14,10 +14,16 @@
 // -------------------------------------------------------------------------------
 
 let client = null;
-let roomSession = null;
+let call = null;
 let currentToken = null;
 let currentDestination = null;
 let isConnected = false;
+
+// v4: track every RxJS Subscription so teardown can unsubscribe them all
+let subscriptions = [];
+let remoteVideoEl = null;
+let lastRemoteSig = '';
+let teardownDone = false;
 
 
 // -------------------------------------------------------------------------------
@@ -35,7 +41,83 @@ const totalCountEl = document.getElementById('total-count');
 
 
 // -------------------------------------------------------------------------------
-// Connection Functions
+// v4 helpers
+// -------------------------------------------------------------------------------
+
+function track(sub) {
+    if (sub) subscriptions.push(sub);
+    return sub;
+}
+
+function streamSignature(stream) {
+    return stream.getTracks().map(t => t.kind + ':' + t.id).sort().join(',');
+}
+
+// Hardened token fetch: tolerate the FastAPI tuple-return array shape and
+// validate the payload so a bad response fails loudly.
+async function fetchGuestToken() {
+    const resp = await fetch('/get_token');
+    let data = await resp.json();
+    if (Array.isArray(data)) data = data[0] || {};
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+    if (!data.token || !data.address) throw new Error('Token response missing token/address');
+    return data;
+}
+
+// Gate the dial on the client connecting (replays synchronously; never errors
+// on bad creds -> needs a timeout).
+function waitForConnected(swClient, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let sub = null;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            if (sub) { try { sub.unsubscribe(); } catch (e) {} }
+            reject(new Error('Timed out waiting for SignalWire connection'));
+        }, timeoutMs);
+        sub = swClient.isConnected$.subscribe(connected => {
+            if (connected && !settled) {
+                settled = true;
+                clearTimeout(timer);
+                setTimeout(() => { if (sub) { try { sub.unsubscribe(); } catch (e) {} } }, 0);
+                resolve();
+            }
+        });
+    });
+}
+
+// Render the remote (Sigmond avatar) stream ourselves. Leave it UNMUTED (carries
+// the remote audio). Re-attach on track-set change.
+function attachRemoteStream(stream) {
+    if (!stream) return;
+    if (!videoContainer) return;
+
+    const placeholder = videoContainer.querySelector('.placeholder');
+    if (placeholder) placeholder.style.display = 'none';
+
+    if (!remoteVideoEl) {
+        remoteVideoEl = document.createElement('video');
+        remoteVideoEl.autoplay = true;
+        remoteVideoEl.playsInline = true;
+        remoteVideoEl.setAttribute('playsinline', '');
+        remoteVideoEl.style.width = '100%';
+        remoteVideoEl.style.height = '100%';
+        remoteVideoEl.style.objectFit = 'cover';
+        videoContainer.appendChild(remoteVideoEl);
+    }
+
+    const sig = streamSignature(stream);
+    if (sig !== lastRemoteSig) {
+        lastRemoteSig = sig;
+        remoteVideoEl.srcObject = stream;
+        remoteVideoEl.play().catch(e => console.log('Remote video play blocked:', e.message));
+    }
+}
+
+
+// -------------------------------------------------------------------------------
+// Connection Functions (v4)
 // -------------------------------------------------------------------------------
 
 async function connect() {
@@ -44,99 +126,76 @@ async function connect() {
         return;
     }
 
+    // Reset per-connection state
+    teardownDone = false;
+    subscriptions = [];
+    remoteVideoEl = null;
+    lastRemoteSig = '';
+
     updateStatus('connecting', 'Getting token...');
     logEvent('system', 'Fetching authentication token...');
 
     try {
-        const tokenResp = await fetch('/get_token');
-        const tokenData = await tokenResp.json();
-
-        if (tokenData.error) {
-            throw new Error(tokenData.error);
-        }
-
+        const tokenData = await fetchGuestToken();
         currentToken = tokenData.token;
         currentDestination = tokenData.address;
 
         logEvent('system', `Token received, destination: ${currentDestination}`);
         updateStatus('connecting', 'Initializing client...');
 
-        client = await window.SignalWire.SignalWire({
-            token: currentToken,
-            logLevel: 'debug'
-        });
+        const SW = window.SignalWire;
+        if (!SW || typeof SW.SignalWire !== 'function') {
+            throw new Error('SignalWire v4 SDK not loaded');
+        }
 
+        // v4: constructor auto-connects; guest SAT via StaticCredentialProvider
+        client = new SW.SignalWire(new SW.StaticCredentialProvider({ token: currentToken }));
+
+        // v4: surface SDK errors/warnings (replaces logLevel: 'debug')
+        track(client.errors$.subscribe(e => logEvent('error', `SDK error: ${e && e.message || e}`)));
+        track(client.warnings$.subscribe(w => console.warn('SDK warning:', w && w.code, w && w.message)));
+
+        await waitForConnected(client, 15000);
         logEvent('system', 'Client initialized');
-
-        // Set up event listeners on the client
-        client.on('user_event', (params) => {
-            console.log('CLIENT EVENT: user_event', params);
-            handleUserEvent(params);
-        });
-
-        client.on('calling.user_event', (params) => {
-            console.log('CLIENT EVENT: calling.user_event', params);
-            handleUserEvent(params);
-        });
-
-        client.on('signalwire.event', (params) => {
-            console.log('CLIENT EVENT: signalwire.event', params);
-            if (params.event_type === 'user_event') {
-                handleUserEvent(params.params || params);
-            }
-        });
 
         updateStatus('connecting', 'Dialing agent...');
 
-        roomSession = await client.dial({
-            to: currentDestination,
-            rootElement: videoContainer,
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-            },
-            video: true,
-            negotiateVideo: true,
+        // No vision on this agent -> receive-only avatar video, no camera prompt.
+        call = await client.dial(currentDestination, {
+            audio: true,
+            video: false,
+            receiveAudio: true,
+            receiveVideo: true,
             userVariables: {
                 userName: 'Web Client',
-                interface: 'web-ui',
-                timestamp: new Date().toISOString()
+                interface: 'web-ui-v4'
             }
         });
 
         logEvent('system', 'Call initiated, waiting for connection...');
 
-        // Room session event listeners
-        roomSession.on('user_event', (params) => {
-            console.log('ROOM EVENT: user_event', params);
+        // Remote avatar video + audio
+        track(call.remoteStream$.subscribe(stream => attachRemoteStream(stream)));
+
+        // Single user_event subscription (handleUserEvent unwraps .event/.params)
+        track(call.subscribe('user_event').subscribe(evt => {
+            const params = (evt && evt.params) ? evt.params : evt;
             handleUserEvent(params);
-        });
+        }));
 
-        roomSession.on('room.joined', () => {
-            logEvent('system', 'Connected to Wire Heating and Air');
-            updateStatus('connected', 'Connected');
-            isConnected = true;
-            updateButtons();
-
-            const placeholder = videoContainer.querySelector('.placeholder');
-            if (placeholder) {
-                placeholder.style.display = 'none';
-            }
-        });
-
-        roomSession.on('room.left', () => {
-            logEvent('system', 'Disconnected from agent');
-            handleDisconnect();
-        });
-
-        roomSession.on('destroy', () => {
-            logEvent('system', 'Session destroyed');
-            handleDisconnect();
-        });
-
-        await roomSession.start();
-        logEvent('system', 'Call started successfully');
+        // Call lifecycle
+        track(call.status$.subscribe({
+            next: (status) => {
+                console.log('call.status:', status);
+                if (status === 'connected') {
+                    onConnected();
+                } else if (status === 'disconnected' || status === 'failed' || status === 'destroyed') {
+                    logEvent('system', 'Disconnected from agent');
+                    handleDisconnect();
+                }
+            },
+            complete: () => handleDisconnect()
+        }));
 
     } catch (error) {
         console.error('Connection error:', error);
@@ -147,8 +206,19 @@ async function connect() {
 }
 
 
+function onConnected() {
+    logEvent('system', 'Connected to Wire Heating and Air');
+    updateStatus('connected', 'Connected');
+    isConnected = true;
+    updateButtons();
+
+    const placeholder = videoContainer.querySelector('.placeholder');
+    if (placeholder) placeholder.style.display = 'none';
+}
+
+
 async function disconnect() {
-    if (!isConnected && !roomSession) {
+    if (!isConnected && !call) {
         logEvent('system', 'Not connected');
         return;
     }
@@ -157,8 +227,8 @@ async function disconnect() {
     updateStatus('disconnecting', 'Disconnecting...');
 
     try {
-        if (roomSession) {
-            await roomSession.hangup();
+        if (call) {
+            await call.hangup();
         }
     } catch (error) {
         console.error('Disconnect error:', error);
@@ -169,8 +239,21 @@ async function disconnect() {
 
 
 function handleDisconnect() {
+    if (teardownDone) return;
+    teardownDone = true;
+
+    // Unsubscribe every tracked RxJS subscription
+    subscriptions.forEach(s => { try { s.unsubscribe(); } catch (e) {} });
+    subscriptions = [];
+
+    if (client) {
+        try { client.disconnect(); } catch (e) {}
+        client = null;
+    }
+    call = null;
     isConnected = false;
-    roomSession = null;
+    remoteVideoEl = null;
+    lastRemoteSig = '';
 
     videoContainer.innerHTML = `
         <div class="placeholder">
@@ -379,6 +462,9 @@ async function loadConfig() {
 // -------------------------------------------------------------------------------
 // Initialization
 // -------------------------------------------------------------------------------
+
+// Buttons are wired via inline onclick= in index.html (connect/disconnect are
+// module-global functions), so no addEventListener here.
 
 logEvent('system', 'Wire Heating and Air loaded');
 logEvent('system', 'Ready to connect');
