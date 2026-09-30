@@ -615,3 +615,22 @@ footer a:hover {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
 }
+
+/* Voice selection */
+.voice-select-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.voice-select {
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+    font-size: 0.9rem;
+    cursor: pointer;
+    background: white;
+}
+.voice-select:focus {
+    outline: none;
+    border-color: #4a90d9;
+}

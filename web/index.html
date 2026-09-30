@@ -58,6 +58,12 @@ Displays service requests and handles real-time updates.
             <div class="controls">
                 <button id="connect-btn" onclick="connect()">Connect</button>
                 <button id="disconnect-btn" onclick="disconnect()" disabled>Disconnect</button>
+                <label class="voice-select-label">
+                    <span>🗣️</span>
+                    <select id="voiceSelect" class="voice-select">
+                        <!-- Voices loaded dynamically from JSON -->
+                    </select>
+                </label>
             </div>
 
             <!-- Status Display -->
@@ -110,6 +116,6 @@ Displays service requests and handles real-time updates.
     </footer>
 
     <!-- Application JavaScript -->
-    <script src="app.js"></script>
+    <script src="app.js?v=3"></script>
 </body>
 </html>

@@ -58,6 +58,22 @@ swml_handler_info = {
     "address": None
 }
 
+# Voice store file path (shared between workers)
+VOICE_STORE_FILE = "/tmp/afterhours_voice.txt"
+
+def get_stored_voice():
+    """Get voice from shared file store."""
+    try:
+        with open(VOICE_STORE_FILE, 'r') as f:
+            return f.read().strip()
+    except:
+        return None
+
+def set_stored_voice(voice):
+    """Set voice in shared file store."""
+    with open(VOICE_STORE_FILE, 'w') as f:
+        f.write(voice)
+
 # -------------------------------------------------------------------------------
 # Service Request Data Structures (In-Memory)
 # -------------------------------------------------------------------------------
@@ -279,6 +295,11 @@ class AfterHoursAgent(AgentBase):
             name="Wire Heating and Air",
             route="/afterhours"
         )
+
+        # Set AI model
+        self.set_params({
+            "ai_model_62c3bdb19a89": "gpt-oss-120b"
+        })
 
         self._setup_prompts()
         self._setup_contexts()
@@ -789,11 +810,21 @@ class AfterHoursAgent(AgentBase):
             )
             self.set_post_prompt_url(post_prompt_url)
 
+        # Dynamic voice selection from file store
+        default_voice = "inworld.Elizabeth:inworld-tts-1.5-max"
+        selected_voice = get_stored_voice() or default_voice
+        print(f"Using voice: {selected_voice}", flush=True)
+
+        # Clear existing languages before adding
+        if hasattr(self, '_languages'):
+            self._languages = []
+
         self.add_language(
             name="English",
             code="en-US",
-            voice="elevenlabs.adam"
+            voice=selected_voice
         )
+        self._languages[-1]["params"] = {"streaming": True}
 
         self.add_hints([
             "Wire Heating and Air",
@@ -839,8 +870,12 @@ def create_server(port=None):
     # Token Generation Endpoint
     # -------------------------------------------------------------------------
     @server.app.get("/get_token")
-    def get_token():
+    def get_token(voice: str = "inworld.Elizabeth:inworld-tts-1.5-max"):
         """Generate a guest token for the web client."""
+        # Store the selected voice for use in SWML requests
+        set_stored_voice(voice)
+        print(f"Stored voice selection: {voice}", flush=True)
+
         sw_host = get_signalwire_host()
         project = os.getenv("SIGNALWIRE_PROJECT_ID", "")
         token = os.getenv("SIGNALWIRE_TOKEN", "")
