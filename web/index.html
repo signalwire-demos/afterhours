@@ -25,10 +25,25 @@ Displays service requests and handles real-time updates.
     <link rel="icon" type="image/png" href="/afterhours.png">
 
     <!-- Styles -->
-    <link rel="stylesheet" href="styles.css">
+    <!-- Apply the saved theme before first paint (avoids a flash of the default). -->
+    <script>
+        try {
+            document.documentElement.setAttribute(
+                'data-theme', localStorage.getItem('afterhoursTheme') || 'classic');
+        } catch (e) {}
+    </script>
+
+    <!-- SignalWire brand type: Instrument Sans (headings), Lexend (body),
+         JetBrains Mono (eyebrows, labels, logs). Only used by that theme, but
+         loaded once so switching does not cause a flash of fallback type. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@500;600;700&family=JetBrains+Mono:wght@400;700&family=Lexend:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="styles.css?v=8">
 
     <!-- SignalWire SDK (pinned; UMD global is window.SignalWire) -->
-    <script src="https://cdn.signalwire.com/@signalwire/js@4.0.0-rc.0"></script>
+    <script src="https://cdn.signalwire.com/@signalwire/js@4.0.0-rc.3"></script>
 </head>
 <body>
     <!-- Header -->
@@ -113,9 +128,25 @@ Displays service requests and handles real-time updates.
             <a href="https://github.com/signalwire-demos/afterhours" target="_blank">GitHub</a> |
             <a href="https://developer.signalwire.com" target="_blank">Documentation</a>
         </p>
+        <div class="footer-row">
+            <!-- Only the build half hides when the commit is unknown; the row
+                 itself always renders, or the theme picker would vanish too. -->
+            <span class="build-info hidden" id="buildInfo">
+                Build
+                <a id="buildCommit" class="build-commit" href="#" target="_blank" rel="noopener noreferrer"></a>
+            </span>
+
+            <label class="theme-picker">
+                Theme
+                <select id="themeSelect" aria-label="Interface theme">
+                    <option value="classic">Wire Heating</option>
+                    <option value="signalwire">SignalWire</option>
+                </select>
+            </label>
+        </div>
     </footer>
 
     <!-- Application JavaScript -->
-    <script src="app.js?v=3"></script>
+    <script src="app.js?v=6"></script>
 </body>
 </html>

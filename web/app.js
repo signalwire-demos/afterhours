@@ -553,3 +553,52 @@ logEvent('system', 'Ready to connect');
 // Load config and requests on page load
 loadConfig();
 refreshRequests();
+
+// -------------------------------------------------------------------------------
+// Theme picker
+// -------------------------------------------------------------------------------
+// The saved theme is applied pre-paint by an inline script in index.html; this
+// only syncs the dropdown and handles changes. Validate against the real options:
+// an unknown stored value would set select.value to '' and render it blank.
+(function setupThemePicker() {
+    const themeSelect = document.getElementById('themeSelect');
+    if (!themeSelect) return;
+
+    const known = Array.from(themeSelect.options).map((o) => o.value);
+    let saved = localStorage.getItem('afterhoursTheme') || 'classic';
+    if (!known.includes(saved)) {
+        console.warn(`Unknown saved theme '${saved}' - falling back to classic`);
+        saved = 'classic';
+        localStorage.setItem('afterhoursTheme', saved);
+    }
+    document.documentElement.setAttribute('data-theme', saved);
+    themeSelect.value = saved;
+
+    themeSelect.addEventListener('change', (e) => {
+        const t = e.target.value || 'classic';
+        document.documentElement.setAttribute('data-theme', t);
+        localStorage.setItem('afterhoursTheme', t);
+    });
+})();
+
+// The footer stays hidden unless a real commit comes back: a visitor seeing
+// "Build unknown" is worse than no footer, and /api/version deliberately
+// returns unknown rather than guessing.
+(async function showBuildVersion() {
+    const info = document.getElementById('buildInfo');
+    const link = document.getElementById('buildCommit');
+    if (!info || !link) return;
+    try {
+        const resp = await fetch('/api/version', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const v = await resp.json();
+        if (!v || !v.short) return;
+        link.textContent = v.short;
+        link.title = `${v.commit} (via ${v.source})`;
+        if (v.repo && v.commit) link.href = `${v.repo}/commit/${v.commit}`;
+        info.classList.remove('hidden');
+    } catch (e) {
+        // A demo must not fail to load because it could not name its build.
+        console.warn('Build version unavailable:', e);
+    }
+})();

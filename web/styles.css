@@ -625,12 +625,312 @@ footer a:hover {
 .voice-select {
     padding: 8px 12px;
     border-radius: 6px;
-    border: 1px solid #ccc;
+    border: 1px solid var(--border-color);
     font-size: 0.9rem;
     cursor: pointer;
-    background: white;
+    /* Was hardcoded white, which stood out against both dark themes. */
+    background: var(--bg-input);
+    color: var(--text-primary);
 }
 .voice-select:focus {
     outline: none;
     border-color: #4a90d9;
 }
+
+
+/* ===============================================================================
+   THEME LAYER
+   -------------------------------------------------------------------------------
+   Two themes share one token contract, so components never branch on theme.
+   Beyond colour, each theme sets a type scale, a spacing rhythm and an elevation
+   ramp, because those are what actually separate a considered interface from a
+   recoloured one.
+
+   Tokens added here (both themes define all of them):
+     --font-sans / --font-mono     type stacks
+     --text-xs .. --text-3xl       type scale
+     --tracking-tight/wide         letter-spacing for display vs label text
+     --radius-sm/md/lg/pill        corner ramp
+     --e1/--e2/--e3                elevation ramp
+     --ring                        focus ring, one definition for the whole UI
+     --dur-fast/--ease             motion
+   =============================================================================== */
+
+:root {
+    --font-sans: "Google Sans Text", "Roboto", -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --text-xs:   0.75rem;
+    --text-sm:   0.875rem;
+    --text-base: 1rem;
+    --text-lg:   1.125rem;
+    --text-xl:   1.375rem;
+    --text-2xl:  1.75rem;
+    --text-3xl:  2.25rem;
+
+    --tracking-tight: -0.02em;
+    --tracking-wide:   0.08em;
+
+    --radius-sm: 6px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-pill: 999px;
+
+    --e1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
+    --e2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
+    --e3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.30);
+
+    --ring: 0 0 0 3px color-mix(in srgb, var(--color-accent) 45%, transparent);
+    --dur-fast: 120ms;
+    --ease: cubic-bezier(.2, 0, 0, 1);
+}
+
+/* Shared refinements. These apply to both themes: they are structure, not colour. */
+body { font-family: var(--font-sans); }
+
+h1, h2, h3 { letter-spacing: var(--tracking-tight); }
+
+.stat-label,
+.theme-picker,
+.build-info {
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    font-size: var(--text-xs);
+}
+
+.stat-value { font-size: var(--text-3xl); letter-spacing: var(--tracking-tight); }
+
+/* One focus definition for every interactive element, instead of per-component. */
+button:focus-visible,
+select:focus-visible,
+a:focus-visible {
+    outline: none;
+    box-shadow: var(--ring);
+    border-radius: var(--radius-sm);
+}
+
+.card, .stat-card, .requests-container, #video-container {
+    border-radius: var(--radius-md);
+    box-shadow: var(--e1);
+}
+
+button {
+    border-radius: var(--radius-pill);
+    font-weight: 600;
+    letter-spacing: .01em;
+    transition: background var(--dur-fast) var(--ease),
+                box-shadow var(--dur-fast) var(--ease),
+                transform var(--dur-fast) var(--ease);
+}
+button:hover:not(:disabled) { box-shadow: var(--e2); }
+button:active:not(:disabled) { transform: translateY(1px); box-shadow: var(--e1); }
+
+@media (prefers-reduced-motion: reduce) {
+    button { transition: none; }
+    button:active:not(:disabled) { transform: none; }
+}
+
+/* -------------------------------------------------------------------------------
+   Theme: SignalWire
+   -------------------------------------------------------------------------------
+   Built to the SignalWire design system rather than "brand colours applied".
+   The rules that shaped this, and what they overturned in the previous pass:
+
+     60-30-10        60% neutral, 30% secondary surfaces, 10% accent. Colour is
+                     rare so that it means something.
+     Headings        ALWAYS neutral (#f0f0f4). Never coloured. The old theme had
+                     a turquoise H1, which is the single loudest violation.
+     Fuchsia         stats, eyebrows, links, primary emphasis. NOT headings,
+                     body text, backgrounds or borders.
+     Blue #044EF4    fills and focus rings only. Never text on dark - too low
+                     contrast. This is the primary button colour.
+     Turquoise       NOT a general accent. Link default and positive marks only.
+                     The old theme used it as the accent everywhere.
+     Highlighting    a stat is raised surface + fuchsia value. Never a coloured
+                     border, background or outline on the card.
+     Type            Instrument Sans headings / Lexend body / JetBrains Mono
+                     eyebrows and labels.
+   ------------------------------------------------------------------------------- */
+html[data-theme="signalwire"] {
+    color-scheme: dark;
+
+    --sw-blue:      #044EF4;
+    --sw-fuchsia:   #F72A72;
+    --sw-turquoise: #40E0D0;
+    --sw-purple:    #601BE6;
+    --sw-gold:      #FFD700;
+
+    /* Three surface levels, cool blue undertone. */
+    --bg-primary:   #0e0e18;
+    --bg-secondary: #181a28;
+    --bg-card:      #222436;
+    --bg-input:     #2a2a2e;
+
+    --text-primary:   #f0f0f4;
+    --text-secondary: #a0a0aa;
+    --text-muted:     #a0a0aa;   /* fg-subtle is decorative only, never for text */
+
+    --border-color: rgba(255, 255, 255, .12);
+
+    --color-primary: #044EF4;
+    --color-primary-dark: #0342cf;
+    --color-secondary: #a0a0aa;
+    --color-accent: #F72A72;     /* the 10%: stats and emphasis */
+    --color-success: #22c55e;
+    --color-warning: #FFD700;
+    --color-error: #ef4444;
+    --color-emergency: #F72A72;
+
+    --font-sans: "Lexend", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-display: "Instrument Sans", "Lexend", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --e1: 0 4px 16px rgba(0,0,0,.50);
+    --e2: 0 4px 16px rgba(0,0,0,.50);
+    --e3: 0 4px 40px rgba(247,42,114,.08);
+    --ring: 0 0 0 3px rgba(4,78,244,.30);
+
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-pill: 100px;
+}
+
+html[data-theme="signalwire"] body {
+    font-family: var(--font-sans);
+    line-height: 1.7;
+}
+
+/* A quiet navy field, not a rainbow band. The brand gradient token. */
+html[data-theme="signalwire"] header {
+    background: linear-gradient(135deg, #0a0a12 0%, #0e1028 35%, #0c2060 100%);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: none;
+}
+html[data-theme="signalwire"] header h1 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    /* The base stylesheet paints this heading with a gradient via
+       background-clip:text, which beats `color` and is exactly what the brand
+       rules forbid (headings are ALWAYS neutral). Unset the clip, or the H1
+       renders pink no matter what colour is declared. */
+    background: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    -webkit-text-fill-color: #f0f0f4;
+    color: #f0f0f4;
+}
+/* The subtitle becomes an eyebrow: mono, uppercase, wide-tracked, fuchsia. */
+html[data-theme="signalwire"] header .subtitle {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--sw-fuchsia);
+}
+html[data-theme="signalwire"] .github-link { color: #a0a0aa; }
+html[data-theme="signalwire"] .github-link:hover { color: #f0f0f4; }
+
+html[data-theme="signalwire"] h2,
+html[data-theme="signalwire"] h3 {
+    font-family: var(--font-display);
+    color: #f0f0f4;
+    letter-spacing: -0.02em;
+}
+
+/* Primary action is brand blue with white text. */
+html[data-theme="signalwire"] #connect-btn {
+    background: var(--sw-blue);
+    color: #fff;
+    font-weight: 600;
+}
+html[data-theme="signalwire"] #connect-btn:hover:not(:disabled) {
+    background: #0342cf;
+    box-shadow: 0 0 20px rgba(4,78,244,.25);
+}
+
+html[data-theme="signalwire"] a { color: var(--sw-turquoise); }
+html[data-theme="signalwire"] a:hover { color: var(--sw-fuchsia); }
+
+/* Highlighting a stat: raised surface + fuchsia value. No coloured border,
+   no coloured fill - both are explicitly called out as dated. */
+html[data-theme="signalwire"] .stat-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-left: 1px solid var(--border-color);
+    box-shadow: none;
+}
+html[data-theme="signalwire"] .stat-card.emergency {
+    background: var(--bg-card);
+    border-left: 1px solid var(--border-color);
+}
+html[data-theme="signalwire"] .stat-card.emergency .stat-value { color: var(--sw-fuchsia); }
+html[data-theme="signalwire"] .stat-card .stat-value { color: #f0f0f4; }
+html[data-theme="signalwire"] .stat-label {
+    font-family: var(--font-mono);
+    color: #a0a0aa;
+    letter-spacing: .14em;
+}
+
+html[data-theme="signalwire"] .card,
+html[data-theme="signalwire"] .requests-container {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--e1);
+}
+
+/* Terminal aesthetic for the log, per the code-block rule. */
+html[data-theme="signalwire"] #activity-log,
+html[data-theme="signalwire"] .activity-log {
+    background: #1e1e1f;
+    font-family: var(--font-mono);
+    font-size: .8125rem;
+}
+
+/* -------------------------------------------------------------------------------
+   Footer: build identity + theme picker
+   ------------------------------------------------------------------------------- */
+footer .footer-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-lg);
+    flex-wrap: wrap;
+}
+
+.build-info { display: inline-flex; align-items: center; gap: .4rem; color: var(--text-muted); }
+.build-info.hidden { display: none; }
+.build-commit {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-pill);
+}
+.build-commit:hover { color: var(--color-accent); border-color: var(--color-accent); }
+
+.theme-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    color: var(--text-muted);
+}
+.theme-picker select {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: .3rem .6rem;
+    font: inherit;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: pointer;
+}
+.theme-picker select:hover { border-color: var(--color-accent); }

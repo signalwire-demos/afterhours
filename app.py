@@ -29,6 +29,8 @@ Environment Variables (see .env.example):
 import os
 import time
 import logging
+import re
+import json
 import threading
 import warnings
 import random
@@ -85,7 +87,133 @@ def set_stored_voice(voice):
 # -------------------------------------------------------------------------------
 # Service Request Data Structures (In-Memory)
 # -------------------------------------------------------------------------------
-SERVICE_REQUESTS = {}
+# Service requests are written by SWAIG handlers and read by the admin API.
+# Gunicorn runs multiple workers, so a plain dict gave each worker its own copy
+# and roughly half of all admin reads missed the ticket. File-backed + locked so
+# every worker sees the same data. Set SERVICE_REQUEST_STORE to a mounted path
+# to survive container recreation.
+SERVICE_REQUEST_STORE = os.environ.get("SERVICE_REQUEST_STORE", "/tmp/afterhours_requests.json")
+_STORE_LOCK = threading.Lock()
+
+
+def _load_requests() -> dict:
+    """Read every service request. Returns {} if the store is absent/corrupt."""
+    try:
+        with open(SERVICE_REQUEST_STORE, "r") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    except Exception as e:
+        print(f"[store] read failed: {e}", flush=True)
+        return {}
+
+
+# -------------------------------------------------------------------------------
+# Build identity
+# -------------------------------------------------------------------------------
+# Mirrors the cinebot footer: every demo should be able to say which commit it is
+# actually running. Resolution order matters - Dokku sets GIT_REV at runtime, the
+# COMMIT file is written at image build (.git is excluded from the build context,
+# so the container cannot shell out to git).
+_COMMIT_CACHE = None
+
+
+def resolve_commit() -> dict:
+    """Return {commit, short, source, repo} for whatever this process is running."""
+    global _COMMIT_CACHE
+    if _COMMIT_CACHE is not None:
+        return _COMMIT_CACHE
+
+    here = Path(__file__).parent
+    found, source = "", "unknown"
+
+    for var in ("SOURCE_VERSION", "GIT_COMMIT", "COMMIT_SHA", "GIT_REV"):
+        value = (os.environ.get(var) or "").strip()
+        if value:
+            found, source = value, f"env:{var}"
+            break
+
+    if not found:
+        try:
+            found = (here / "COMMIT").read_text(encoding="utf-8").strip()
+            source = "file:COMMIT"
+        except OSError:
+            pass
+
+    # Accept only something that looks like a SHA, so a stray file or a mis-set
+    # variable cannot put arbitrary text into the page footer.
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", found or ""):
+        found, source = "", "unknown"
+
+    _COMMIT_CACHE = {
+        "commit": found,
+        "short": found[:7],
+        "source": source,
+        "repo": "https://github.com/signalwire-demos/afterhours",
+    }
+    return _COMMIT_CACHE
+
+
+def _page_technician(record: dict) -> bool:
+    """Notify the on-call technician about an emergency.
+
+    Sends an SMS when TECH_PAGER_NUMBER and SIGNALWIRE_FROM_NUMBER are both
+    configured; otherwise logs loudly so the demo still shows the branch firing.
+    Returns True if a page was actually sent.
+    """
+    # Gas is the one detail a technician must see before they travel, and it is
+    # only reliably in the gas_smell flag - callers do not always repeat it in
+    # the free-text description.
+    system = {"ac_repair": "A/C", "heating_repair": "Heating"}.get(
+        record.get("issue_type", ""), record.get("issue_type", "Unknown")
+    )
+    when = datetime.utcnow().strftime("%H:%M UTC")
+
+    desc = (record.get("issue_description") or "").strip()
+    if len(desc) > 140:
+        desc = desc[:140].rsplit(" ", 1)[0] + "..."
+
+    callback = record.get("callback_primary", "")
+    alt = record.get("callback_alternate", "")
+    if alt:
+        callback = f"{callback} / alt {alt}"
+
+    lines = [f"EMERGENCY {record['id']} ({when})"]
+    if record.get("gas_smell"):
+        lines.append("** GAS SMELL REPORTED - caller advised to evacuate **")
+    lines += [
+        record.get("customer_name", "Unknown caller"),
+        record.get("service_address", "No address given"),
+        f"{system}. Callback {callback}",
+    ]
+    if desc:
+        lines.append(desc)
+    summary = "\n".join(lines)
+    to_number = os.environ.get("TECH_PAGER_NUMBER")
+    from_number = os.environ.get("SIGNALWIRE_FROM_NUMBER")
+    if not (to_number and from_number):
+        print(f"[page] (not configured, would send) {summary}", flush=True)
+        return False
+    try:
+        client = build_rest_client()
+        client.messages.create(from_=from_number, to=to_number, body=summary)
+        print(f"[page] sent to {to_number}: {record['id']}", flush=True)
+        return True
+    except Exception as e:
+        print(f"[page] FAILED for {record['id']}: {e}", flush=True)
+        return False
+
+
+def _save_request(ticket_number: str, record: dict) -> None:
+    """Add one request, serialized across workers and written atomically."""
+    with _STORE_LOCK:
+        current = _load_requests()
+        current[ticket_number] = record
+        tmp = f"{SERVICE_REQUEST_STORE}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(current, fh)
+        os.replace(tmp, SERVICE_REQUEST_STORE)
 
 
 def generate_ticket_number():
@@ -103,6 +231,17 @@ def say_digits(number_str: str) -> str:
         '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'
     }
     return ' '.join(digit_words.get(d, d) for d in number_str)
+
+def say_phone(number_str: str) -> str:
+    """Speak a phone number digit by digit.
+
+    Echoing "+15555555555" straight into TTS reads it as a single enormous
+    number. Strips formatting and reads the digits, same idea as say_digits
+    but tolerant of +, spaces, dashes and parentheses.
+    """
+    digits = re.sub(r"\D", "", number_str or "")
+    return say_digits(digits) if digits else (number_str or "")
+
 
 
 # Server configuration
@@ -301,8 +440,16 @@ class AfterHoursAgent(AgentBase):
 
         # Set AI model
         self.set_params({
-            "ai_model_62c3bdb19a89": "gpt-oss-120b"
+            "ai_model_62c3bdb19a89": "gpt-oss-120b",
+            # DIAGNOSTIC: ships the running conversation (call_log) with every SWAIG
+            # request so we can see what ASR actually heard. Remove once resolved.
+            "swaig_post_conversation": True,
         })
+
+        # Without this the AI session ends and the caller is left on an open line
+        # in silence. On the SDK production checklist and easy to omit, because
+        # testing always ends by hanging up from the other side.
+        self.add_post_ai_verb("hangup", {})
 
         self._setup_prompts()
         self._setup_contexts()
@@ -320,6 +467,31 @@ class AfterHoursAgent(AgentBase):
         )
 
         self.prompt_add_section(
+            "Global Data",
+            "Your working memory for this call is global_data.pending_request. Every "
+            "set_ function writes to it, and it travels with the conversation, so it is "
+            "always current. Read it before you ask anything: if a field is already "
+            "filled, you have the answer and must not ask for it again. If the caller "
+            "gives you something you have not recorded yet - in their opening sentence "
+            "or anywhere since - call the matching set_ function straight away rather "
+            "than waiting for the step that normally asks for it. When they volunteer "
+            "several details at once, record all of them, then speak.\n\n"
+            "Recording is silent - it is not a reply. After every set_ function, say "
+            "something to the caller: acknowledge what you captured and ask for the next "
+            "thing still missing from pending_request. Never run two set_ functions back "
+            "to back without speaking in between, and never leave the caller in silence "
+            "waiting for you.",
+            bullets=[
+                "pending_request.issue_type - set_issue_type - usually clear from the first sentence",
+                "pending_request.is_emergency - set_urgency - usually clear from the problem itself",
+                "pending_request.customer_name - set_customer_name",
+                "pending_request.service_address - set_service_address",
+                "pending_request.callback_primary - set_callback_numbers",
+                "pending_request.issue_description - set_issue_description",
+            ],
+        )
+
+        self.prompt_add_section(
             "Service Request Flow",
             "IMPORTANT: Ask only ONE question at a time and wait for the answer before asking the next. "
             "Never batch multiple questions together. Follow the steps in order - each step will guide you "
@@ -332,7 +504,7 @@ class AfterHoursAgent(AgentBase):
                 "Emergency examples: No heat when below freezing, no AC when dangerously hot, gas smell, carbon monoxide alarm",
                 "Non-emergency examples: Unit making noise, not cooling/heating as well as usual, thermostat issues",
                 "For emergencies, reassure the customer that dispatch will call back as soon as possible",
-                "For gas smells or CO alarms, advise customer to leave the building and call 911 if needed"
+                "For gas smells or CO alarms, advise customer to leave the building and call nine one one if needed. Always say it as nine one one, never as a single number"
             ]
         )
 
@@ -347,65 +519,125 @@ class AfterHoursAgent(AgentBase):
         contexts = self.define_contexts()
 
         # -----------------------------------------------------------------------
+        # Triage Context - defined FIRST so it is the entry point.
+        #
+        # This used to sit behind a greeting step. That step could not record
+        # anything (only start_service_request was callable), but nothing stopped
+        # the model talking: it gathered the whole intake conversationally, banked
+        # none of it, then started the real flow and asked for it all again.
+        # Greeting here means there is no window in which that can happen.
+        # -----------------------------------------------------------------------
+        triage = contexts.add_context("triage")
+        triage.add_step("assess_urgency") \
+            .set_text(
+                "Establish whether this is an emergency. The greeting has already invited "
+                "the caller to explain, so if what they said makes it clear - no heat in "
+                "freezing conditions, no cooling in dangerous heat, a gas smell, anything "
+                "unsafe - record it and move on without asking. Only if it is still "
+                "unclear, ask: is this an emergency, or a routine repair?"
+            ) \
+            .set_step_criteria("Customer has indicated whether this is an emergency") \
+            .set_functions(["set_urgency", "cancel_flow"]) \
+            .set_valid_contexts(["emergency_intake", "service_request", "greeting"])
+
+
+        # -----------------------------------------------------------------------
         # Greeting Context - Entry point
         # -----------------------------------------------------------------------
         greeting = contexts.add_context("greeting")
+        # A step with no set_functions exposes EVERY tool. With 11 of them the
+        # model stops reliably picking the right one (the SDK documents the
+        # degradation past ~7-8), so it never called start_service_request, never
+        # left this step, and collected fields in whatever order it fancied.
+        # Whitelisting one tool here is what forces the flow into triage.
         greeting.add_step("welcome") \
-            .set_text(
-                "Thank you for calling Wire Heating and Air after-hours emergency service. "
-                "Are you experiencing a heating or air conditioning problem?"
-            ) \
-            .set_step_criteria("Customer indicates they need service") \
-            .set_valid_steps(["next"])
-        greeting.add_step("ready") \
-            .set_text("I can help you with that. Let me get some information.") \
-            .set_functions(["start_service_request"])
+            .set_text("Is there anything else I can help you with tonight?") \
+            .set_step_criteria("Customer has said whether they need anything further") \
+            .set_functions(["start_service_request"]) \
+            .set_valid_contexts(["triage"])
 
         # -----------------------------------------------------------------------
-        # Service Request Context - Collect details one question at a time
+        # Emergency Intake - the short path. Unit details and ownership are
+        # deferred to the callback so a technician is paged sooner.
+        # -----------------------------------------------------------------------
+        emergency = contexts.add_context("emergency_intake")
+
+        emergency.add_step("get_issue_type") \
+            .set_text("Record whether it is the air conditioning or the heating system. If the caller has already given this, record it and move on without asking. Otherwise, ask which it is.") \
+            .set_step_criteria("Customer has indicated whether it is a heating or an air conditioning issue") \
+            .set_functions(["set_issue_type", "cancel_flow"]) \
+            .set_valid_steps(["get_customer_name"])
+
+        emergency.add_step("get_customer_name") \
+            .set_text("Record the caller's name. If the caller has already given this, record it and move on without asking. Otherwise, ask for it.") \
+            .set_step_criteria("Customer has provided their name") \
+            .set_functions(["set_customer_name", "cancel_flow"]) \
+            .set_valid_steps(["get_service_address"])
+
+        emergency.add_step("get_service_address") \
+            .set_text("Record the service address. If the caller has already given this, record it and move on without asking. Otherwise, ask for it, including any apartment or unit number.") \
+            .set_step_criteria("Customer has provided the service address") \
+            .set_functions(["set_service_address", "cancel_flow"]) \
+            .set_valid_steps(["get_callback_numbers"])
+
+        emergency.add_step("get_callback_numbers") \
+            .set_text("Record a callback number. If the caller has already given this, record it and move on without asking. Otherwise, ask for the best number for the technician to reach them.") \
+            .set_step_criteria("Customer has provided a callback number") \
+            .set_functions(["set_callback_numbers", "cancel_flow"]) \
+            .set_valid_steps(["get_issue_description"])
+
+        emergency.add_step("get_issue_description") \
+            .set_text("Record a brief description of the problem. If the caller has already given this, record it and move on without asking. Otherwise, ask what is happening.") \
+            .set_step_criteria("Customer has described the issue") \
+            .set_functions(["set_issue_description", "cancel_flow"]) \
+            .set_valid_contexts(["confirmation", "greeting"])
+
+        # -----------------------------------------------------------------------
+        # Service Request Context - full intake for routine calls
         # -----------------------------------------------------------------------
         service_req = contexts.add_context("service_request")
 
         service_req.add_step("get_issue_type") \
-            .set_text("First, is this for your air conditioning or heating system? And would you consider this an emergency?") \
-            .set_step_criteria("Customer has indicated issue type (AC or heating) and emergency status") \
+            .set_text("Record whether it is the air conditioning or the heating system. If the caller has already given this, record it and move on without asking. Otherwise, ask which it is.") \
+            .set_step_criteria("Customer has indicated whether it is a heating or an air conditioning issue") \
             .set_functions(["set_issue_type", "cancel_flow"]) \
             .set_valid_steps(["get_customer_name"])
 
         service_req.add_step("get_customer_name") \
-            .set_text("May I have your name please?") \
+            .set_text("Record the caller's name. If the caller has already given this, record it and move on without asking. Otherwise, ask for it.") \
             .set_step_criteria("Customer has provided their name") \
             .set_functions(["set_customer_name", "cancel_flow"]) \
             .set_valid_steps(["get_service_address"])
 
         service_req.add_step("get_service_address") \
-            .set_text("What is the service address? Please include the full street address and any apartment or unit number.") \
+            .set_text("Record the service address. If the caller has already given this, record it and move on without asking. Otherwise, ask for the full street address and any apartment or unit number.") \
             .set_step_criteria("Customer has provided the service address") \
             .set_functions(["set_service_address", "cancel_flow"]) \
             .set_valid_steps(["get_unit_info"])
 
         service_req.add_step("get_unit_info") \
-            .set_text("Can you tell me about your HVAC unit - the brand if you know it, approximately how old it is, and where it's located?") \
+            .set_text("Record any unit details: brand, rough age, where it sits. If the caller has already given this, record it and move on without asking. Otherwise, ask, and accept whatever they know.") \
             .set_step_criteria("Customer has provided unit information") \
             .set_functions(["set_unit_info", "cancel_flow"]) \
             .set_valid_steps(["get_ownership"])
 
         service_req.add_step("get_ownership") \
-            .set_text("Do you own or rent this property?") \
+            .set_text("Record whether they own or rent. If the caller has already given this, record it and move on without asking. Otherwise, ask.") \
             .set_step_criteria("Customer has indicated ownership status") \
             .set_functions(["set_ownership", "cancel_flow"]) \
             .set_valid_steps(["get_callback_numbers"])
 
         service_req.add_step("get_callback_numbers") \
-            .set_text("What's the best phone number for our technician to reach you? And is there an alternate number?") \
+            .set_text("Record a callback number, and an alternate if offered. If the caller has already given this, record it and move on without asking. Otherwise, ask for the best number to reach them.") \
             .set_step_criteria("Customer has provided callback number(s)") \
             .set_functions(["set_callback_numbers", "cancel_flow"]) \
             .set_valid_steps(["get_issue_description"])
 
         service_req.add_step("get_issue_description") \
-            .set_text("Please describe the problem you're experiencing with your system.") \
+            .set_text("Record a description of the problem. If the caller has already given this, record it and move on without asking. Otherwise, ask them to describe it.") \
             .set_step_criteria("Customer has described the issue") \
-            .set_functions(["set_issue_description", "cancel_flow"])
+            .set_functions(["set_issue_description", "cancel_flow"]) \
+            .set_valid_contexts(["confirmation", "greeting"])
 
         # -----------------------------------------------------------------------
         # Confirmation Context - Review and confirm
@@ -413,7 +645,8 @@ class AfterHoursAgent(AgentBase):
         confirm = contexts.add_context("confirmation")
         confirm.add_step("confirm") \
             .set_text("Please review your service request details.") \
-            .set_functions(["confirm_request", "cancel_flow"])
+            .set_functions(["confirm_request", "cancel_flow"]) \
+            .set_valid_contexts(["greeting"])
 
     def _setup_functions(self):
         """Define SWAIG functions for service request workflow."""
@@ -423,25 +656,89 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="start_service_request",
-            description="Start collecting a new service request. Use when customer needs HVAC service. After this, collect: issue type, name, address, unit info, ownership, callback numbers, then issue description."
+            fillers={"en-US": ["Let me pull up a new service request."]},
+            description="Begin a new service request once the caller needs HVAC service."
         )
         def start_service_request(args: dict, raw_data: dict = None) -> SwaigFunctionResult:
             return (
                 SwaigFunctionResult(
                     "I'll get a service request started for you. "
-                    "First, is this for your air conditioning or heating system? "
-                    "And would you consider this an emergency situation?"
+                    "Before I take your details - is this an emergency? "
+                    "That means no heat in freezing conditions, no cooling in dangerous heat, "
+                    "or you smell gas."
                 )
-                .swml_change_context("service_request")
+                .swml_change_context("triage")
                 .update_global_data({"pending_request": {}})
             )
 
         # -----------------------------------------------------------------------
         # Set Issue Type
         # -----------------------------------------------------------------------
+        # -----------------------------------------------------------------------
+        # Set Urgency - asked first, and it decides which intake path we take
+        # -----------------------------------------------------------------------
+        @self.tool(
+            name="set_urgency",
+            fillers={"en-US": ["Let me note the urgency."]},
+            description=(
+                "Record whether this is an emergency. Call as soon as the caller has "
+                "indicated urgency. An emergency is no heat in freezing conditions, no "
+                "cooling in dangerous heat, a gas smell, or anything unsafe."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "is_emergency": {
+                        "type": "boolean",
+                        "description": "True for an emergency, false for a routine service request."
+                    },
+                    "gas_smell": {
+                        "type": "boolean",
+                        "description": "True only if the caller reports smelling gas."
+                    }
+                },
+                "required": ["is_emergency"]
+            }
+        )
+        def set_urgency(args: dict, raw_data: dict = None) -> SwaigFunctionResult:
+            is_emergency = bool(args.get("is_emergency", False))
+            gas_smell = bool(args.get("gas_smell", False))
+            raw_data = raw_data or {}
+            global_data = raw_data.get("global_data", {})
+            pending = global_data.get("pending_request", {})
+
+            pending["is_emergency"] = is_emergency
+            pending["gas_smell"] = gas_smell
+            global_data["pending_request"] = pending
+
+            if gas_smell:
+                # Safety first: this is the one case where we stop collecting.
+                response = (
+                    "If you smell gas, please leave the building right now and call your "
+                    "gas utility or nine one one from outside. I will still take your details "
+                    "so a technician can follow up. "
+                )
+            elif is_emergency:
+                response = (
+                    "Understood, I'm treating this as an emergency and I'll page the on-call "
+                    "technician as soon as I have your details. I'll keep this brief. "
+                )
+            else:
+                response = "Thanks, I'll take the full details for a routine service visit. "
+
+            target = "emergency_intake" if is_emergency else "service_request"
+            response += "First, is this for your air conditioning or your heating system?"
+
+            return (
+                SwaigFunctionResult(response)
+                .swml_change_context(target)
+                .update_global_data(global_data)
+            )
+
         @self.tool(
             name="set_issue_type",
-            description="Record the type of issue (AC or heating) and whether it's an emergency. After setting, ask for customer name.",
+            fillers={"en-US": ["Noting the system type."]},
+            description="Record whether the issue is with the air conditioning or the heating system.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -450,29 +747,26 @@ class AfterHoursAgent(AgentBase):
                         "description": "Type of issue: 'ac_repair' or 'heating_repair'",
                         "enum": ["ac_repair", "heating_repair"]
                     },
-                    "is_emergency": {
-                        "type": "boolean",
-                        "description": "True if this is an emergency (no heat in freezing temps, no AC in dangerous heat, gas smell, etc.)"
-                    }
                 },
-                "required": ["issue_type", "is_emergency"]
+                "required": ["issue_type"]
             }
         )
         def set_issue_type(args: dict, raw_data: dict = None) -> SwaigFunctionResult:
             issue_type = args.get("issue_type", "ac_repair")
-            is_emergency = args.get("is_emergency", False)
             raw_data = raw_data or {}
             global_data = raw_data.get("global_data", {})
             pending = global_data.get("pending_request", {})
 
             pending["issue_type"] = issue_type
-            pending["is_emergency"] = is_emergency
+            # Urgency is set earlier by set_urgency; read it, never overwrite it.
+            is_emergency = bool(pending.get("is_emergency", False))
             global_data["pending_request"] = pending
 
-            issue_name = "air conditioning" if issue_type == "ac_repair" else "heating"
+            # "a air conditioning" reads badly in TTS; pick the article to match.
+            issue_name = "an air conditioning" if issue_type == "ac_repair" else "a heating"
             urgency = "emergency" if is_emergency else "service request"
 
-            response = f"I've noted this as a {issue_name} {urgency}. "
+            response = f"I've noted this as {issue_name} {urgency}. "
             if is_emergency:
                 response += "We'll prioritize getting a technician to call you back. "
             response += "May I have your name please?"
@@ -487,7 +781,8 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="set_customer_name",
-            description="Record the customer's name. After setting name, ask for service address.",
+            fillers={"en-US": ["Let me get your name on the ticket."]},
+            description="Record the customer's name.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -521,7 +816,8 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="set_service_address",
-            description="Record the full service address. After setting address, ask about the HVAC unit.",
+            fillers={"en-US": ["Writing down the service address."]},
+            description="Record the full service address where the work is needed.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -542,11 +838,16 @@ class AfterHoursAgent(AgentBase):
             pending["service_address"] = address
             global_data["pending_request"] = pending
 
+            # The emergency path skips unit details and ownership, so the next
+            # question differs. Keep the spoken prompt aligned with the step chain.
+            if pending.get("is_emergency"):
+                nxt = "What's the best phone number for the technician to reach you?"
+            else:
+                nxt = ("Can you tell me about your HVAC unit? Any details help - the brand, "
+                       "approximate age, or where it's located like rooftop, basement, or closet.")
+
             return (
-                SwaigFunctionResult(
-                    f"Got it, {address}. Can you tell me about your HVAC unit? "
-                    "Any details help - the brand, approximate age, or where it's located like rooftop, basement, or closet."
-                )
+                SwaigFunctionResult(f"Got it, {address}. {nxt}")
                 .update_global_data(global_data)
             )
 
@@ -555,7 +856,8 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="set_unit_info",
-            description="Record information about the HVAC unit. After setting, ask if they own or rent.",
+            fillers={"en-US": ["Noting the unit details."]},
+            description="Record details about the HVAC unit: brand, age, location.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -588,7 +890,8 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="set_ownership",
-            description="Record whether the customer owns or rents the property. After setting, ask for callback number.",
+            fillers={"en-US": ["Noting that down."]},
+            description="Record whether the customer owns or rents the property.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -626,7 +929,8 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="set_callback_numbers",
-            description="Record callback phone number(s). After setting, ask for issue description.",
+            fillers={"en-US": ["Saving your callback number."]},
+            description="Record the callback phone number, and an alternate if given.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -654,9 +958,9 @@ class AfterHoursAgent(AgentBase):
                 pending["callback_alternate"] = alternate
             global_data["pending_request"] = pending
 
-            response = f"I have {primary} as your callback number"
+            response = f"I have {say_phone(primary)} as your callback number"
             if alternate:
-                response += f" with {alternate} as a backup"
+                response += f" with {say_phone(alternate)} as a backup"
             response += ". Now, please describe the problem you're experiencing with your system."
 
             return (
@@ -669,7 +973,8 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="set_issue_description",
-            description="Record the detailed description of the issue. This completes collection and moves to confirmation.",
+            fillers={"en-US": ["Writing up the problem description."]},
+            description="Record the caller's description of the problem.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -717,6 +1022,7 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="confirm_request",
+            fillers={"en-US": ["Submitting your service request now."]},
             description="Finalize and submit the service request."
         )
         def confirm_request(args: dict, raw_data: dict = None) -> SwaigFunctionResult:
@@ -744,18 +1050,27 @@ class AfterHoursAgent(AgentBase):
                 "callback_alternate": pending.get("callback_alternate", ""),
                 "issue_type": pending["issue_type"],
                 "is_emergency": pending.get("is_emergency", False),
+                "gas_smell": pending.get("gas_smell", False),
                 "issue_description": pending["issue_description"],
                 "created_at": datetime.utcnow().isoformat(),
                 "status": "pending"
             }
 
-            SERVICE_REQUESTS[ticket_number] = service_request
+            _save_request(ticket_number, service_request)
+
+            paged = False
+            if service_request["is_emergency"]:
+                paged = _page_technician(service_request)
 
             # Clear pending request
             global_data["pending_request"] = {}
             global_data["last_request_id"] = ticket_number
 
-            urgency_msg = "as soon as possible" if service_request["is_emergency"] else "shortly"
+            if service_request["is_emergency"]:
+                urgency_msg = "right away - I've paged the on-call technician" if paged \
+                    else "right away - the on-call technician is being notified now"
+            else:
+                urgency_msg = "during our next available slot"
 
             # Use say_digits for TTS-friendly pronunciation
             spoken_number = say_digits(ticket_number)
@@ -780,6 +1095,7 @@ class AfterHoursAgent(AgentBase):
         # -----------------------------------------------------------------------
         @self.tool(
             name="cancel_flow",
+            fillers={"en-US": ["No problem, clearing that."]},
             description="Cancel the current action and return to the main menu."
         )
         def cancel_flow(args: dict, raw_data: dict = None) -> SwaigFunctionResult:
@@ -791,9 +1107,57 @@ class AfterHoursAgent(AgentBase):
                 .update_global_data({"pending_request": {}})
             )
 
+    def on_function_call(self, name, args, raw_data=None):
+        """DIAGNOSTIC: log what ASR heard before running the function."""
+        try:
+            raw = raw_data or {}
+            log = raw.get("call_log") or raw.get("raw_call_log") or []
+            cid = raw.get("call_id", "?")
+            print(f"[transcript] fn={name} call_id={cid} turns={len(log)}", flush=True)
+            for turn in log[-12:]:
+                role = turn.get("role", "?")
+                content = (turn.get("content") or "").replace("\n", " ")
+                if content:
+                    print(f"[transcript]   {role}: {content[:300]}", flush=True)
+            if not log:
+                print(f"[transcript]   (empty) raw keys: {sorted(raw.keys())[:20]}", flush=True)
+        except Exception as e:
+            print(f"[transcript] logging failed: {e}", flush=True)
+        return super().on_function_call(name, args, raw_data)
+
     def on_swml_request(self, request_data, callback_path, request=None):
         """Configure dynamic settings for each request."""
         self.set_param("end_of_speech_timeout", 700)
+
+        # Spoken verbatim before the model takes over, so the opening line is
+        # identical on every call instead of being re-improvised each time.
+        self.set_param(
+            "static_greeting",
+            "Thank you for calling Wire Heating and Air after-hours emergency service. "
+            "How can I help you today?"
+        )
+        # Let callers talk over it - people who are cold or smell gas should not
+        # have to wait out a greeting.
+        self.set_param("static_greeting_no_barge", False)
+        # Without this the agent speaks the greeting and then waits for the
+        # caller before doing anything, so the first step question is never
+        # asked. The SDK's own survey prefab pairs the two for this reason.
+        self.set_param("wait_for_user", False)
+
+        # The browser needs time to attach remoteStream$ and clear the autoplay
+        # gate; audio sent before that is lost, not buffered, so the caller hears
+        # half the greeting and answers "Hello?". The SDK pitfall entry cites a
+        # measured 1715ms to audible with 1200ms still clipping, hence 2000.
+        self.set_param("initial_sleep_ms", 2000)
+
+        # NOTE: set_internal_fillers() was removed here while isolating a hang -
+        # calls were answering with zero media after it was added. Re-add only
+        # once a call is confirmed working without it.
+
+        # The platform default (5s) cut callers off mid-sentence: one answered
+        # "I wanna..." and the timeout fired before they finished, so ownership
+        # was recorded from a guess.
+        self.set_param("attention_timeout", 15000)
 
         base_url = self.get_full_url(include_auth=False)
 
@@ -872,6 +1236,11 @@ def create_server(port=None):
     # -------------------------------------------------------------------------
     # Token Generation Endpoint
     # -------------------------------------------------------------------------
+    @server.app.get("/api/version")
+    def version_info():
+        """Which commit this instance is actually running."""
+        return JSONResponse(content=resolve_commit())
+
     @server.app.get("/get_token")
     def get_token(voice: str = "inworld.Elizabeth:inworld-tts-1.5-max"):
         """Generate a guest token for the web client."""
@@ -936,7 +1305,7 @@ def create_server(port=None):
     @server.app.get("/api/requests")
     def get_requests():
         """Return all service requests sorted by creation time."""
-        requests_list = list(SERVICE_REQUESTS.values())
+        requests_list = list(_load_requests().values())
         # Sort by created_at descending (newest first)
         requests_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
@@ -953,8 +1322,9 @@ def create_server(port=None):
     @server.app.get("/api/requests/{request_id}")
     def get_request(request_id: str):
         """Return a single service request by ID."""
-        if request_id in SERVICE_REQUESTS:
-            return SERVICE_REQUESTS[request_id]
+        _all = _load_requests()
+        if request_id in _all:
+            return _all[request_id]
         return JSONResponse({"error": "Request not found"}, status_code=404)
 
     # -------------------------------------------------------------------------
