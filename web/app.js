@@ -561,21 +561,25 @@ refreshRequests();
 // only syncs the dropdown and handles changes. Validate against the real options:
 // an unknown stored value would set select.value to '' and render it blank.
 (function setupThemePicker() {
+    // Must match the pre-paint default in index.html, which decides before this
+    // file loads -- a mismatch shows one theme briefly then flips to the other.
+    const DEFAULT_THEME = 'signalwire';
+
     const themeSelect = document.getElementById('themeSelect');
     if (!themeSelect) return;
 
     const known = Array.from(themeSelect.options).map((o) => o.value);
-    let saved = localStorage.getItem('afterhoursTheme') || 'classic';
+    let saved = localStorage.getItem('afterhoursTheme') || DEFAULT_THEME;
     if (!known.includes(saved)) {
-        console.warn(`Unknown saved theme '${saved}' - falling back to classic`);
-        saved = 'classic';
+        console.warn(`Unknown saved theme '${saved}' - falling back to ${DEFAULT_THEME}`);
+        saved = DEFAULT_THEME;
         localStorage.setItem('afterhoursTheme', saved);
     }
     document.documentElement.setAttribute('data-theme', saved);
     themeSelect.value = saved;
 
     themeSelect.addEventListener('change', (e) => {
-        const t = e.target.value || 'classic';
+        const t = e.target.value || DEFAULT_THEME;
         document.documentElement.setAttribute('data-theme', t);
         localStorage.setItem('afterhoursTheme', t);
     });
