@@ -15,6 +15,13 @@ An after-hours emergency HVAC service agent built with SignalWire AI. Customers 
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+![The Wire Heating and Air dashboard in the SignalWire theme, showing an emergency heating request and a routine AC request beside the live call controls and activity log](web/screenshot-signalwire.png)
+
+*The dashboard in the SignalWire theme, with one request of each tier: an
+emergency the caller confirmed, and a routine visit that collected unit details
+and ownership. Switch themes from the footer; the build hash beside it is the
+commit actually running.*
+
 ## Features
 
 - **After-Hours Service** - 24/7 emergency call handling for HVAC issues
@@ -67,7 +74,7 @@ An after-hours emergency HVAC service agent built with SignalWire AI. Customers 
 │  │  │  Video  │  │           Service Requests                    │  │   │
 │  │  │  Call   │  │  ┌──────────────────────────────────────────┐ │  │   │
 │  │  │         │  │  │ [EMERGENCY] AC Repair                    │ │  │   │
-│  │  ├─────────┤  │  │  John Smith - 123 Main St                │ │  │   │
+│  │  ├─────────┤  │  │  Jim Smith - 123 River Road                │ │  │   │
 │  │  │ Connect │  │  │  AC not working, house at 95 degrees     │ │  │   │
 │  │  └─────────┘  │  └──────────────────────────────────────────┘ │  │   │
 │  │               │  ┌──────────────────────────────────────────┐ │  │   │
@@ -81,78 +88,143 @@ An after-hours emergency HVAC service agent built with SignalWire AI. Customers 
 
 ## Conversation Flow
 
+The caller is routed into one of two intakes, and **the caller decides which**.
+An emergency pages the on-call technician overnight, so it is not inferred from
+the problem description.
+
 ```
-                                    START
-                                      │
+                        ┌──────────────────────────────┐
+                        │  GREETING (static)           │
+                        │  "...How can I help you      │
+                        │   today?"                    │
+                        └──────────────┬───────────────┘
+                                       ▼
+                        ┌──────────────────────────────┐
+                        │  TRIAGE  (assess_urgency)    │
+                        │                              │
+                        │  Acknowledge the problem in  │
+                        │  their words, say what you   │
+                        │  think, then ASK:            │
+                        │  "treat it as an emergency,  │
+                        │   or can it wait for normal  │
+                        │   business hours?"           │
+                        │                              │
+                        │  set_urgency() also banks    │
+                        │  issue_type and the caller's │
+                        │  own issue_description.      │
+                        └───────┬──────────────┬───────┘
+                   emergency    │              │   routine
+                                ▼              ▼
+              ┌───────────────────────┐  ┌───────────────────────┐
+              │ EMERGENCY_INTAKE      │  │ SERVICE_REQUEST       │
+              │ collect (gather_info) │  │ collect (gather_info) │
+              │                       │  │                       │
+              │ 1. customer_name      │  │ 1. customer_name      │
+              │ 2. service_address ✓  │  │ 2. service_address ✓  │
+              │ 3. callback_primary ✓ │  │ 3. unit_info          │
+              │                       │  │ 4. ownership          │
+              │ unit/ownership are    │  │ 5. callback_primary ✓ │
+              │ deferred to the       │  │                       │
+              │ callback, to page a   │  │ ✓ = read back and     │
+              │ technician sooner.    │  │     confirmed         │
+              └───────────┬───────────┘  └───────────┬───────────┘
+                          │                          │
+                          ▼                          ▼
+              ┌──────────────────────────────────────────────────┐
+              │  review  →  confirm_request()                    │
+              │  Reads back name, address and the problem in     │
+              │  their words, then submits. Rejects a ticket     │
+              │  whose address is the caller's name, or has no   │
+              │  street number.                                  │
+              └───────────────────────┬──────────────────────────┘
                                       ▼
-                        ┌─────────────────────────┐
-                        │    GREETING CONTEXT     │
-                        │                         │
-                        │  "Thank you for calling │
-                        │   Wire Heating and Air  │
-                        │   after-hours service.  │
-                        │   Are you experiencing  │
-                        │   a heating or AC       │
-                        │   problem?"             │
-                        └───────────┬─────────────┘
-                                    │
-                                    ▼
-                        ┌─────────────────────────┐
-                        │  SERVICE REQUEST        │
-                        │  CONTEXT                │
-                        │                         │
-                        │  Collect in order:      │
-                        │  1. Issue type + urgent │
-                        │  2. Customer name       │
-                        │  3. Service address     │
-                        │  4. Unit information    │
-                        │  5. Own or rent         │
-                        │  6. Callback number(s)  │
-                        │  7. Issue description   │
-                        └───────────┬─────────────┘
-                                    │
-                                    ▼
-                        ┌─────────────────────────┐
-                        │  CONFIRMATION CONTEXT   │
-                        │                         │
-                        │  "Let me confirm:       │
-                        │   [Name] at [Address]   │
-                        │   [Issue] - [Urgency]   │
-                        │   Callback: [Phone]     │
-                        │   Is this correct?"     │
-                        │                         │
-                        │  ┌─────────┐ ┌────────┐ │
-                        │  │ Confirm │ │ Cancel │ │
-                        │  └────┬────┘ └───┬────┘ │
-                        └───────┼──────────┼──────┘
-                                │          │
-                                ▼          ▼
-                        ┌──────────────┐  Back to
-                        │   REQUEST    │  Greeting
-                        │   SUBMITTED  │
-                        │              │
-                        │ Ticket ID    │
-                        │ provided     │
-                        │              │
-                        │ Real-time    │
-                        │ update sent  │
-                        │ to dashboard │
-                        └──────────────┘
+              ┌──────────────────────────────────────────────────┐
+              │  GREETING (welcome)                              │
+              │  Ticket number read twice, "anything else?",     │
+              │  then end_call() hangs up.                       │
+              └──────────────────────────────────────────────────┘
 ```
+
+A gas smell short-circuits all of this: it is recorded immediately without
+asking whether it is urgent, and the caller is told to leave the building and
+call nine one one from outside.
 
 ## Data Collected
 
-| Field | Description | Example |
-|-------|-------------|---------|
-| Issue Type | AC repair or heating repair | `ac_repair` |
-| Is Emergency | True if urgent situation | `true` |
-| Customer Name | Name of the customer | `John Smith` |
-| Service Address | Full address with unit | `123 Main St, Apt 4B, Austin TX` |
-| Unit Info | HVAC unit details | `Carrier AC, 10 years, rooftop` |
-| Ownership | Own or rent | `rent` |
-| Callback Primary | Main callback number | `+15551234567` |
-| Callback Alternate | Backup number (optional) | `+15559876543` |
-| Issue Description | Detailed problem description | `AC blowing warm air` |
+Where a field comes from matters as much as what it is: anything the caller
+already said is taken from what they said, not asked again.
+
+| Field | Source | Example |
+|-------|--------|---------|
+| Issue Type | banked by `set_urgency` at triage | `ac_repair` |
+| Issue Description | banked at triage, in the caller's own words | `air conditioner is not working` |
+| Is Emergency | **asked and confirmed by the caller** | `false` |
+| Gas Smell | only if the caller mentions gas | `false` |
+| Customer Name | gather | `Jim Smith` |
+| Service Address | gather, read back and confirmed | `123 River Road, Pittsburgh, Pennsylvania 15222` |
+| Unit Info | gather, routine intake only | `Trane xp2 4000, basement, about five years old` |
+| Ownership | gather, routine intake only | `own` |
+| Callback Primary | gather, read back and confirmed | `5555555555` |
+| Callback Alternate | optional | |
+
+Two fields are deliberately absent from the gather. `issue_type` and
+`issue_description` are captured during triage, because the caller has already
+described the problem by the time urgency is settled - asking again produced
+"I already told you" on a real call.
+
+Spoken digits are folded back into numerals before a ticket is written, so a
+caller reading out "one five two two two" is filed as `15222` rather than as
+the words.
+
+## Agent Design
+
+### SWAIG functions
+
+Five, deliberately. Every field the gather can collect was once a `set_` function
+of its own; eleven tools degraded the model's choice badly enough that it called
+the wrong one, so collection moved into `gather_info` and the tools shrank to the
+decisions.
+
+| Function | Does |
+|---|---|
+| `start_service_request` | enter triage from the greeting |
+| `set_urgency` | record emergency/routine, and bank `issue_type` + `issue_description` |
+| `confirm_request` | validate, write the ticket, push it to the dashboard |
+| `end_call` | say goodbye and hang up |
+| `cancel_flow` | abandon and return to the greeting |
+
+### The emergency gate
+
+`set_urgency` requires `confirmed_by_caller`, and the handler **refuses** an
+emergency without it, returning an instruction to go and ask. This is enforced
+in the schema rather than the prompt because the prompt already asked for it and
+the model skipped it: on one call "my air conditioner is not working" became
+`is_emergency: true` with nobody consulted, which pages a technician overnight.
+
+Gas is the one exception - you do not ask someone who smells gas whether it is
+urgent.
+
+### Turn-taking
+
+These are not defaults, and each one was found by a call that went wrong.
+
+| Setting | Value | Why |
+|---|---|---|
+| `enable_barge` | `True` | Without it the caller cannot interrupt. One call logged **one** `speech_detect` in 152 seconds while 7571 packets of their audio arrived: the agent's own prompting was deafening it. |
+| `attention_timeout` | `30000` | 15s was too aggressive for an after-hours line - someone at their furnace is not an absent caller. |
+| `attention_timeout_prompt` | set | Without it the platform **replays the full greeting** on every timeout, which sounds like the line reset. One call played it three times. |
+| `static_greeting` | set | With `wait_for_user: False`, or the call stalls. |
+| `initial_sleep_ms` | `2000` | Measured 1715ms to audible; speaking earlier loses the opening words. |
+| model override | **none** | A pinned `gpt-oss-120b` produced 108 `reasoning_only_retry` events and 240 LLM round trips in one call, and spoke a retry filler aloud. On the platform default the same flow takes ~20. |
+
+### Prompt sections
+
+`Use Their Words` is the one that shapes how the agent sounds: acknowledge the
+problem in the caller's own terms before asking anything, name the stake briefly
+(no heat means cold), then move on. The acknowledgement rides on the **first
+gather question**, because a function's response text and a step's `set_text` are
+both discarded when `swml_change_context` hands over to a gather - the gather
+takes the turn immediately.
 
 ## Quick Start
 
@@ -233,21 +305,22 @@ curl http://localhost:5000/api/requests
 {
   "requests": [
     {
-      "id": "req_a1b2c3d4",
-      "customer_name": "John Smith",
-      "service_address": "123 Main St, Austin TX 78701",
-      "unit_info": "Carrier AC, 10 years old",
-      "ownership": "own",
-      "callback_primary": "+15551234567",
+      "id": "128727",
+      "customer_name": "Jim Smith",
+      "service_address": "123 River Road, Pittsburgh, Pennsylvania 15222",
+      "unit_info": "It's a Trane xp2 4000, it's in the basement, and it's about five years old.",
+      "ownership": "Own",
+      "callback_primary": "5555555555",
       "callback_alternate": "",
       "issue_type": "ac_repair",
-      "is_emergency": true,
-      "issue_description": "AC stopped working, house is 95 degrees",
-      "created_at": "2025-01-10T22:30:00Z",
+      "is_emergency": false,
+      "gas_smell": false,
+      "issue_description": "air conditioner is not working",
+      "created_at": "2026-10-06T15:28:05.346142",
       "status": "pending"
     }
   ],
-  "emergency_count": 1,
+  "emergency_count": 0,
   "total_count": 1
 }
 ```
@@ -258,20 +331,24 @@ curl http://localhost:5000/api/requests
 ┌─────────────────────────────────────────────────────────────────┐
 │                      SERVICE REQUEST                            │
 ├─────────────────────────────────────────────────────────────────┤
-│  id                   string      "req_a1b2c3d4"                │
-│  customer_name        string      "John Smith"                  │
-│  service_address      string      "123 Main St, Austin TX"      │
-│  unit_info            string      "Carrier AC, 10 years"        │
-│  ownership            string      "own" | "rent"                │
-│  callback_primary     string      "+15551234567"                │
-│  callback_alternate   string      "+15559876543"                │
+│  id                   string      "128727"   (6 digits, spoken) │
+│  customer_name        string      "Jim Smith"                   │
+│  service_address      string      "123 River Road, ... 15222"   │
+│  unit_info            string      "Trane xp2 4000, basement"    │
+│  ownership            string      "own" | "rent" | "unknown"    │
+│  callback_primary     string      "5555555555"                  │
+│  callback_alternate   string      ""                            │
 │  issue_type           string      "ac_repair" | "heating_repair"│
 │  is_emergency         boolean     true | false                  │
-│  issue_description    string      "AC stopped working..."       │
-│  created_at           string      "2025-01-10T22:30:00Z"        │
+│  gas_smell            boolean     true | false                  │
+│  issue_description    string      "air conditioner is not ..."  │
+│  created_at           string      "2026-10-06T15:28:05Z"        │
 │  status               string      "pending" | "dispatched"      │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+The id is read back to the caller twice, digit by digit, so it is short and
+numeric rather than a uuid.
 
 ## Tech Stack
 
@@ -284,15 +361,25 @@ curl http://localhost:5000/api/requests
 
 ```
 afterhours/
-├── app.py              # Main application (agent + server)
+├── app.py                      # Agent, SWAIG functions, server, ticket store
 ├── web/
-│   ├── index.html      # Dashboard UI
-│   ├── app.js          # Frontend logic
-│   └── styles.css      # Styling
-├── .env.example        # Environment template
-├── requirements.txt    # Python dependencies
-├── Procfile           # Production server config
-└── .dokku/            # Deployment configuration
+│   ├── index.html              # Dashboard UI (theme picker, build footer)
+│   ├── app.js                  # Frontend logic
+│   ├── styles.css              # Styling
+│   ├── elevenlabs_voices.json  # Voice pickers
+│   ├── inworld_voices.json
+│   ├── afterhours.png          # Branding
+│   └── sigmond_pc*.png|mp4     # Avatar stills and loops
+├── .github/workflows/          # deploy.yml, preview.yml
+├── .dokku/                     # config.yml, services.yml
+├── Dockerfile                  # Container build (runs as appuser)
+├── .dockerignore
+├── .env.example                # Environment template
+├── Procfile                    # Production server config
+├── app.json                    # Deployment manifest
+├── requirements.txt            # Python dependencies
+├── CLAUDE.md                   # Working notes for this demo
+└── README.md
 ```
 
 ## Deployment
